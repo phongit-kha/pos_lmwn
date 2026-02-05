@@ -2,20 +2,110 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-    provider = "prisma-client-js"
-    output   = "../generated/prisma"
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
 }
 
 datasource db {
-    provider = "postgresql"
-    url      = env("DATABASE_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
-model Post {
-    id        Int      @id @default(autoincrement())
-    name      String
-    createdAt DateTime @default(now())
-    updatedAt DateTime @updatedAt
+// ============================================
+// Enums
+// ============================================
 
-    @@index([name])
+enum OrderStatus {
+  OPEN
+  CONFIRMED
+  PAID
+  CANCELLED
+}
+
+enum OrderItemStatus {
+  ACTIVE
+  VOIDED
+}
+
+// ============================================
+// Models
+// ============================================
+
+/// Product master data for menu items
+model Product {
+  id        String   @id @default(cuid())
+  name      String
+  price     Decimal  @db.Decimal(10, 2)
+  category  String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category])
+  @@index([isActive])
+}
+
+/// Order transaction header
+model Order {
+  id            String      @id @default(cuid())
+  tableNumber   Int
+  status        OrderStatus @default(OPEN)
+  /// Financial snapshot - cached subtotal of all ACTIVE items
+  subtotal      Decimal     @default(0) @db.Decimal(10, 2)
+  /// Discount type: "PERCENT" or "FIXED"
+  discountType  String?
+  /// Discount value (percentage or fixed amount)
+  discountValue Decimal?    @db.Decimal(10, 2)
+  /// Final total after discount (floors at 0.00)
+  grandTotal    Decimal     @default(0) @db.Decimal(10, 2)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  items OrderItem[]
+  logs  OrderLog[]
+
+  @@index([status])
+  @@index([tableNumber])
+  @@index([createdAt])
+}
+
+/// Order item / transaction detail with frozen price
+model OrderItem {
+  id            String          @id @default(cuid())
+  orderId       String
+  productId     String
+  /// Frozen product name at time of order
+  productName   String
+  /// Frozen price per unit at time of order (critical for historical accuracy)
+  pricePerUnit  Decimal         @db.Decimal(10, 2)
+  quantity      Int
+  /// Batch sequence for grouping items added at different times
+  batchSequence Int             @default(1)
+  status        OrderItemStatus @default(ACTIVE)
+  /// Reason for voiding (required when status is VOIDED)
+  voidReason    String?
+  createdAt     DateTime        @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([status])
+  @@index([batchSequence])
+}
+
+/// Audit log for order actions
+model OrderLog {
+  id        String   @id @default(cuid())
+  orderId   String
+  /// Action type: CREATE, ADD_ITEMS, CONFIRM, VOID_ITEM, CHECKOUT, CANCEL
+  action    String
+  /// JSON details of the action
+  details   Json
+  createdAt DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([action])
+  @@index([createdAt])
 }
