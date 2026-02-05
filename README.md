@@ -1,29 +1,214 @@
-# Create T3 App
+# Restaurant POS System
 
-This is a [T3 Stack](https://create.t3.gg/) project bootstrapped with `create-t3-app`.
+A robust, financially accurate Point of Sale backend for restaurant operations built with Next.js, Prisma, and PostgreSQL.
 
-## What's next? How do I make an app with this?
+## Features
 
-We try to keep this project as simple as possible, so you can start with just the scaffolding we set up for you, and add additional things later when they become necessary.
+- **Order Management**: Create, view, and manage orders with complete lifecycle support
+- **State Machine**: Strict order state transitions (OPEN → CONFIRMED → PAID/CANCELLED)
+- **Batch Ordering**: Add items to existing orders in separate batches
+- **Frozen Prices**: Historical price preservation for financial accuracy
+- **Void Items**: Soft delete with mandatory reason (audit trail)
+- **Financial Calculations**: Precise monetary calculations using `decimal.js`
+- **Discounts**: Support for percentage and fixed amount discounts
+- **Sales Reports**: Aggregate sales data by date range
+- **API Documentation**: Interactive Swagger UI at `/api-docs`
 
-If you are not familiar with the different technologies used in this project, please refer to the respective docs. If you still are in the wind, please join our [Discord](https://t3.gg/discord) and ask for help.
+## Tech Stack
 
-- [Next.js](https://nextjs.org)
-- [NextAuth.js](https://next-auth.js.org)
-- [Prisma](https://prisma.io)
-- [Drizzle](https://orm.drizzle.team)
-- [Tailwind CSS](https://tailwindcss.com)
-- [tRPC](https://trpc.io)
+- **Runtime**: Node.js with TypeScript
+- **Framework**: Next.js 15 (App Router)
+- **Database**: PostgreSQL 14+
+- **ORM**: Prisma
+- **Validation**: Zod
+- **Math Library**: decimal.js
+- **Testing**: Vitest
+- **Documentation**: Swagger/OpenAPI
 
-## Learn More
+## Prerequisites
 
-To learn more about the [T3 Stack](https://create.t3.gg/), take a look at the following resources:
+- Node.js 18+
+- pnpm
+- Docker & Docker Compose
 
-- [Documentation](https://create.t3.gg/)
-- [Learn the T3 Stack](https://create.t3.gg/en/faq#what-learning-resources-are-currently-available) — Check out these awesome tutorials
+## Quick Start
 
-You can check out the [create-t3-app GitHub repository](https://github.com/t3-oss/create-t3-app) — your feedback and contributions are welcome!
+### 1. Clone and Install Dependencies
 
-## How do I deploy this?
+```bash
+git clone <repository-url>
+cd pos_lmwn
+pnpm install
+```
 
-Follow our deployment guides for [Vercel](https://create.t3.gg/en/deployment/vercel), [Netlify](https://create.t3.gg/en/deployment/netlify) and [Docker](https://create.t3.gg/en/deployment/docker) for more information.
+### 2. Set Up Environment Variables
+
+```bash
+cp .env.example .env
+```
+
+The default configuration works with the Docker Compose setup:
+
+```env
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/pos_lmwn"
+```
+
+### 3. Start PostgreSQL with Docker Compose
+
+```bash
+docker compose up -d
+```
+
+### 4. Run Database Migrations
+
+```bash
+pnpm db:generate
+```
+
+### 5. Start the Development Server
+
+```bash
+pnpm dev
+```
+
+The application will be available at `http://localhost:3000`.
+
+## API Documentation
+
+Interactive API documentation is available at:
+
+```
+http://localhost:3000/api-docs
+```
+
+## API Endpoints
+
+### Products
+
+| Method | Endpoint        | Description                |
+| ------ | --------------- | -------------------------- |
+| POST   | `/api/products` | Create a new product       |
+| GET    | `/api/products` | List products with filters |
+
+### Orders
+
+| Method | Endpoint           | Description              |
+| ------ | ------------------ | ------------------------ |
+| POST   | `/api/orders`      | Create a new order       |
+| GET    | `/api/orders`      | List orders with filters |
+| GET    | `/api/orders/{id}` | Get order details        |
+
+### Order Actions
+
+| Method | Endpoint                               | Description                     |
+| ------ | -------------------------------------- | ------------------------------- |
+| POST   | `/api/orders/{id}/items`               | Add items to order (batch)      |
+| POST   | `/api/orders/{id}/confirm`             | Confirm order (send to kitchen) |
+| PATCH  | `/api/orders/{id}/items/{itemId}/void` | Void an item                    |
+| POST   | `/api/orders/{id}/checkout`            | Checkout with optional discount |
+
+### Reports
+
+| Method | Endpoint             | Description                |
+| ------ | -------------------- | -------------------------- |
+| GET    | `/api/reports/sales` | Sales report by date range |
+
+## Order Lifecycle
+
+```
+┌─────────┐     confirm()      ┌───────────┐     checkout()     ┌──────┐
+│  OPEN   │ ─────────────────▶ │ CONFIRMED │ ─────────────────▶ │ PAID │
+└─────────┘                    └───────────┘                    └──────┘
+     │                              │
+     │         cancel()             │         cancel()
+     └──────────────┬───────────────┘
+                    ▼
+              ┌───────────┐
+              │ CANCELLED │
+              └───────────┘
+```
+
+### State Rules
+
+- **OPEN**: Items can be freely added, modified, or removed
+- **CONFIRMED**: Items can be added (new batch) or voided (with reason)
+- **PAID**: No modifications allowed (terminal state)
+- **CANCELLED**: No modifications allowed (terminal state)
+
+## Testing
+
+Run all tests:
+
+```bash
+pnpm test
+```
+
+Run tests with coverage:
+
+```bash
+pnpm test:coverage
+```
+
+Run tests in watch mode:
+
+```bash
+pnpm test:watch
+```
+
+## Project Structure
+
+```
+src/
+├── app/
+│   ├── api/
+│   │   ├── orders/           # Order endpoints
+│   │   ├── products/         # Product endpoints
+│   │   ├── reports/          # Report endpoints
+│   │   └── docs/             # OpenAPI spec endpoint
+│   └── api-docs/             # Swagger UI page
+├── server/
+│   ├── services/             # Business logic
+│   │   ├── calculation.service.ts
+│   │   ├── order.service.ts
+│   │   ├── product.service.ts
+│   │   └── report.service.ts
+│   ├── validators/           # Zod schemas
+│   ├── types/                # TypeScript types
+│   └── lib/                  # Utilities
+└── __tests__/
+    ├── unit/                 # Unit tests
+    └── integration/          # Integration tests
+```
+
+## Financial Calculations
+
+All monetary calculations use `decimal.js` to avoid floating-point errors:
+
+- **Item Total** = `pricePerUnit × quantity`
+- **Subtotal** = Sum of all ACTIVE item totals
+- **Discount** = `subtotal × (percent/100)` or fixed amount
+- **Grand Total** = `subtotal - discount` (floors at 0.00)
+
+## Environment Variables
+
+| Variable       | Description                  | Default       |
+| -------------- | ---------------------------- | ------------- |
+| `DATABASE_URL` | PostgreSQL connection string | (required)    |
+| `NODE_ENV`     | Environment mode             | `development` |
+
+## Scripts
+
+| Command              | Description                             |
+| -------------------- | --------------------------------------- |
+| `pnpm dev`           | Start development server                |
+| `pnpm build`         | Build for production                    |
+| `pnpm start`         | Start production server                 |
+| `pnpm test`          | Run tests                               |
+| `pnpm test:coverage` | Run tests with coverage                 |
+| `pnpm db:generate`   | Generate Prisma client & run migrations |
+| `pnpm db:push`       | Push schema changes to database         |
+| `pnpm db:studio`     | Open Prisma Studio                      |
+
+## License
+
+MIT
