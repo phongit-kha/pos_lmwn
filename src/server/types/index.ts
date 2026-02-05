@@ -1,4 +1,3 @@
-import type { Decimal } from "decimal.js";
 import type {
   Order as PrismaOrder,
   OrderItem as PrismaOrderItem,
@@ -17,7 +16,10 @@ export type Order = PrismaOrder;
 export type OrderItem = PrismaOrderItem;
 export type OrderLog = PrismaOrderLog;
 
-// Order with relations
+// ==========================================
+// Order Relations
+// ==========================================
+
 export interface OrderWithItems extends Order {
   items: OrderItem[];
 }
@@ -26,10 +28,16 @@ export interface OrderWithItemsAndLogs extends OrderWithItems {
   logs: OrderLog[];
 }
 
-// Discount types
+// ==========================================
+// Discount Types
+// ==========================================
+
 export type DiscountType = "PERCENT" | "FIXED";
 
-// DTOs for API requests
+// ==========================================
+// DTOs for API Requests
+// ==========================================
+
 export interface CreateOrderItemInput {
   productId: string;
   quantity: number;
@@ -50,45 +58,87 @@ export interface VoidItemInput {
 
 export interface CheckoutInput {
   discountType?: DiscountType;
-  discountValue?: number;
+  discountValue?: number; // Whole percentage for PERCENT, satang for FIXED
 }
 
-// DTOs for API responses
+// ==========================================
+// DTOs for API Responses - Detail View
+// ==========================================
+
 export interface OrderItemResponse {
   id: string;
   productId: string;
   productName: string;
-  pricePerUnit: string;
+  pricePerUnit: string; // satang as string
   quantity: number;
   batchSequence: number;
   status: OrderItemStatus;
   voidReason: string | null;
-  itemTotal: string;
+  itemTotal: string; // satang as string
 }
 
 export interface OrderResponse {
   id: string;
   tableNumber: number;
   status: OrderStatus;
-  subtotal: string;
+  subtotal: string; // satang as string
   discountType: string | null;
-  discountValue: string | null;
-  grandTotal: string;
+  discountValue: string | null; // satang or percentage as string
+  grandTotal: string; // satang as string
   createdAt: string;
   updatedAt: string;
   items: OrderItemResponse[];
 }
 
+// ==========================================
+// DTOs for API Responses - List View (Lean)
+// ==========================================
+
 export interface OrderListItem {
   id: string;
   tableNumber: number;
   status: OrderStatus;
-  grandTotal: string;
-  itemCount: number;
+  grandTotal: string; // satang as string
+  itemCount: number; // Only count, not full items
   createdAt: string;
 }
 
-// Sales report types
+export interface ProductListItem {
+  id: string;
+  name: string;
+  price: string; // satang as string
+  category: string;
+  isActive: boolean;
+  // NO timestamps for list view
+}
+
+// ==========================================
+// Pagination Types
+// ==========================================
+
+export interface PaginationParams {
+  page?: number;
+  limit?: number;
+}
+
+export interface PaginationMeta {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrev: boolean;
+}
+
+export interface PaginatedResponse<T> {
+  data: T[];
+  pagination: PaginationMeta;
+}
+
+// ==========================================
+// Sales Report Types
+// ==========================================
+
 export interface SalesReportFilter {
   startDate?: Date;
   endDate?: Date;
@@ -97,9 +147,9 @@ export interface SalesReportFilter {
 export interface SalesReportItem {
   date: string;
   orderCount: number;
-  totalSales: string;
-  totalDiscount: string;
-  netSales: string;
+  totalSales: string; // satang as string
+  totalDiscount: string; // satang as string
+  netSales: string; // satang as string
 }
 
 export interface SalesReport {
@@ -112,49 +162,45 @@ export interface SalesReport {
   dailyBreakdown: SalesReportItem[];
 }
 
-// Calculation service types
+// ==========================================
+// Calculation Service Types
+// ==========================================
+
 export interface CalculationItem {
-  pricePerUnit: Decimal | string | number;
+  pricePerUnit: bigint | string | number;
   quantity: number;
   status: OrderItemStatus;
 }
 
-// Error types
-export class AppError extends Error {
-  constructor(
-    public statusCode: number,
-    message: string,
-    public code?: string
-  ) {
-    super(message);
-    this.name = "AppError";
-  }
+// ==========================================
+// Order Filters
+// ==========================================
+
+export interface OrderFilters extends PaginationParams {
+  status?: OrderStatus;
+  tableNumber?: number;
+  startDate?: Date;
+  endDate?: Date;
 }
 
-export class ValidationError extends AppError {
-  constructor(message: string) {
-    super(400, message, "VALIDATION_ERROR");
-    this.name = "ValidationError";
-  }
+export interface ProductFilters extends PaginationParams {
+  category?: string;
+  isActive?: boolean;
+  search?: string;
 }
 
-export class NotFoundError extends AppError {
-  constructor(resource: string) {
-    super(404, `${resource} not found`, "NOT_FOUND");
-    this.name = "NotFoundError";
-  }
-}
+// ==========================================
+// Error Types (re-exported from errors.ts)
+// ==========================================
 
-export class ConflictError extends AppError {
-  constructor(message: string) {
-    super(409, message, "CONFLICT");
-    this.name = "ConflictError";
-  }
-}
-
-export class InvalidStateError extends AppError {
-  constructor(message: string) {
-    super(400, message, "INVALID_STATE");
-    this.name = "InvalidStateError";
-  }
-}
+export {
+  AppError,
+  ValidationError,
+  NotFoundError,
+  ConflictError,
+  InvalidStateError,
+  ErrorCode,
+  ErrorMessage,
+  Errors,
+} from "@/server/lib/errors";
+export type { ErrorCodeType } from "@/server/lib/errors";
