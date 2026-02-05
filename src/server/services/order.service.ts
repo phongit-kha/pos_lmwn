@@ -1,9 +1,10 @@
-import Decimal from "decimal.js";
 import { db } from "@/server/db";
 import {
   recalculateOrderTotals,
-  toDecimalString,
+  toBigInt,
 } from "@/server/services/calculation.service";
+import { withOrderLock } from "@/server/lib/db-lock";
+import { logger } from "@/server/lib/logger";
 import type {
   OrderStatus,
   OrderItemStatus,
@@ -14,11 +15,15 @@ import type {
   VoidItemInput,
   CheckoutInput,
   OrderItem,
+  OrderFilters,
+  PaginatedResponse,
+  OrderListItem,
 } from "@/server/types";
 import {
   NotFoundError,
   InvalidStateError,
   ValidationError,
+  ErrorMessage,
 } from "@/server/types";
 
 // ============================================
@@ -132,7 +137,7 @@ export async function createOrder(
   const productMap = new Map(products.map((p) => [p.id, p]));
   for (const item of itemsInput) {
     if (!productMap.has(item.productId)) {
-      throw new NotFoundError(`Product ${item.productId}`);
+      throw new NotFoundError("Product", item.productId);
     }
   }
 
@@ -143,8 +148,8 @@ export async function createOrder(
       data: {
         tableNumber,
         status: "OPEN",
-        subtotal: 0,
-        grandTotal: 0,
+        subtotal: 0n,
+        grandTotal: 0n,
       },
     });
 
@@ -171,7 +176,7 @@ export async function createOrder(
       where: { orderId: newOrder.id },
     });
 
-    // Calculate totals
+    // Calculate totals using BigInt
     const { subtotal, grandTotal } = recalculateOrderTotals(
       createdItems.map((item) => ({
         pricePerUnit: item.pricePerUnit,
@@ -186,8 +191,8 @@ export async function createOrder(
     const updatedOrder = await tx.order.update({
       where: { id: newOrder.id },
       data: {
-        subtotal: toDecimalString(subtotal),
-        grandTotal: toDecimalString(grandTotal),
+        subtotal,
+        grandTotal,
       },
       include: { items: true },
     });
@@ -200,7 +205,7 @@ export async function createOrder(
         details: {
           tableNumber,
           itemCount: itemsInput.length,
-          subtotal: toDecimalString(subtotal),
+          subtotal: subtotal.toString(),
         },
       },
     });
@@ -213,29 +218,15 @@ export async function createOrder(
 
 /**
  * Add items to an existing order (batch ordering)
+ * Uses pessimistic locking to prevent race conditions
  */
 export async function addItemsToOrder(
   orderId: string,
   input: AddItemsInput
 ): Promise<OrderWithItems> {
-  const order = await db.order.findUnique({
-    where: { id: orderId },
-    include: { items: true },
-  });
-
-  if (!order) {
-    throw new NotFoundError("Order");
-  }
-
-  if (!canAddItems(order.status)) {
-    throw new InvalidStateError(
-      `Cannot add items to order in ${order.status} state`
-    );
-  }
-
   const { items: itemsInput } = input;
 
-  // Fetch all products
+  // Fetch all products before locking to minimize lock duration
   const productIds = itemsInput.map((item) => item.productId);
   const products = await db.product.findMany({
     where: {
@@ -248,14 +239,23 @@ export async function addItemsToOrder(
   const productMap = new Map(products.map((p) => [p.id, p]));
   for (const item of itemsInput) {
     if (!productMap.has(item.productId)) {
-      throw new NotFoundError(`Product ${item.productId}`);
+      throw new NotFoundError("Product", item.productId);
     }
   }
 
-  // Get next batch sequence
-  const nextBatch = getNextBatchSequence(order.items);
+  logger.info("Adding items to order", { orderId, itemCount: itemsInput.length });
 
-  const updatedOrder = await db.$transaction(async (tx) => {
+  return withOrderLock(orderId, async (tx, order) => {
+    // Validate state inside the lock
+    if (!canAddItems(order.status)) {
+      throw new InvalidStateError(
+        ErrorMessage.ORDER.MUST_BE_IN_STATE("OPEN or CONFIRMED", order.status)
+      );
+    }
+
+    // Get next batch sequence
+    const nextBatch = getNextBatchSequence(order.items);
+
     // Create new order items with frozen prices
     const orderItems = itemsInput.map((item) => {
       const product = productMap.get(item.productId)!;
@@ -279,7 +279,7 @@ export async function addItemsToOrder(
       where: { orderId: order.id },
     });
 
-    // Recalculate totals
+    // Recalculate totals using BigInt
     const { subtotal, grandTotal } = recalculateOrderTotals(
       allItems.map((item) => ({
         pricePerUnit: item.pricePerUnit,
@@ -294,8 +294,8 @@ export async function addItemsToOrder(
     const updated = await tx.order.update({
       where: { id: order.id },
       data: {
-        subtotal: toDecimalString(subtotal),
-        grandTotal: toDecimalString(grandTotal),
+        subtotal,
+        grandTotal,
       },
       include: { items: true },
     });
@@ -308,43 +308,42 @@ export async function addItemsToOrder(
         details: {
           batchSequence: nextBatch,
           itemCount: itemsInput.length,
-          newSubtotal: toDecimalString(subtotal),
+          newSubtotal: subtotal.toString(),
         },
       },
     });
 
+    logger.info("Items added to order", { 
+      orderId, 
+      batchSequence: nextBatch, 
+      newSubtotal: subtotal.toString() 
+    });
+
     return updated;
   });
-
-  return updatedOrder;
 }
 
 /**
  * Confirm an order (send to kitchen)
+ * Uses pessimistic locking to prevent race conditions
  */
 export async function confirmOrder(orderId: string): Promise<OrderWithItems> {
-  const order = await db.order.findUnique({
-    where: { id: orderId },
-    include: { items: true },
-  });
+  logger.info("Confirming order", { orderId });
 
-  if (!order) {
-    throw new NotFoundError("Order");
-  }
+  return withOrderLock(orderId, async (tx, order) => {
+    // Validate state inside the lock
+    if (!validateStateTransition(order.status, "CONFIRMED")) {
+      throw new InvalidStateError(
+        ErrorMessage.ORDER.INVALID_STATE_TRANSITION(order.status, "CONFIRMED")
+      );
+    }
 
-  if (!validateStateTransition(order.status, "CONFIRMED")) {
-    throw new InvalidStateError(
-      `Cannot confirm order in ${order.status} state`
-    );
-  }
+    // Check if there are any active items
+    const activeItems = order.items.filter((item) => item.status === "ACTIVE");
+    if (activeItems.length === 0) {
+      throw new ValidationError(ErrorMessage.ORDER.CANNOT_CHECKOUT_EMPTY);
+    }
 
-  // Check if there are any active items
-  const activeItems = order.items.filter((item) => item.status === "ACTIVE");
-  if (activeItems.length === 0) {
-    throw new ValidationError("Cannot confirm order with no active items");
-  }
-
-  const updatedOrder = await db.$transaction(async (tx) => {
     const updated = await tx.order.update({
       where: { id: orderId },
       data: { status: "CONFIRMED" },
@@ -362,45 +361,40 @@ export async function confirmOrder(orderId: string): Promise<OrderWithItems> {
       },
     });
 
+    logger.info("Order confirmed", { orderId, activeItemCount: activeItems.length });
+
     return updated;
   });
-
-  return updatedOrder;
 }
 
 /**
  * Void an item (soft delete with reason)
+ * Uses pessimistic locking to prevent race conditions
  */
 export async function voidOrderItem(
   orderId: string,
   itemId: string,
   input: VoidItemInput
 ): Promise<OrderWithItems> {
-  const order = await db.order.findUnique({
-    where: { id: orderId },
-    include: { items: true },
-  });
+  logger.info("Voiding order item", { orderId, itemId, reason: input.reason });
 
-  if (!order) {
-    throw new NotFoundError("Order");
-  }
+  return withOrderLock(orderId, async (tx, order) => {
+    // Validate state inside the lock
+    if (!canVoidItem(order.status)) {
+      throw new InvalidStateError(
+        ErrorMessage.ORDER_ITEM.CANNOT_VOID_IN_STATE(order.status)
+      );
+    }
 
-  if (!canVoidItem(order.status)) {
-    throw new InvalidStateError(
-      `Cannot void items in ${order.status} state. Voiding is only allowed in CONFIRMED state.`
-    );
-  }
+    const item = order.items.find((i) => i.id === itemId);
+    if (!item) {
+      throw new NotFoundError("Order item", itemId);
+    }
 
-  const item = order.items.find((i) => i.id === itemId);
-  if (!item) {
-    throw new NotFoundError("Order item");
-  }
+    if (item.status === "VOIDED") {
+      throw new InvalidStateError(ErrorMessage.ORDER_ITEM.ALREADY_VOIDED);
+    }
 
-  if (item.status === "VOIDED") {
-    throw new InvalidStateError("Item is already voided");
-  }
-
-  const updatedOrder = await db.$transaction(async (tx) => {
     // Update item status to VOIDED
     await tx.orderItem.update({
       where: { id: itemId },
@@ -415,7 +409,7 @@ export async function voidOrderItem(
       where: { orderId: order.id },
     });
 
-    // Recalculate totals
+    // Recalculate totals using BigInt
     const { subtotal, grandTotal } = recalculateOrderTotals(
       allItems.map((i) => ({
         pricePerUnit: i.pricePerUnit,
@@ -430,8 +424,8 @@ export async function voidOrderItem(
     const updated = await tx.order.update({
       where: { id: order.id },
       data: {
-        subtotal: toDecimalString(subtotal),
-        grandTotal: toDecimalString(grandTotal),
+        subtotal,
+        grandTotal,
       },
       include: { items: true },
     });
@@ -447,60 +441,139 @@ export async function voidOrderItem(
           quantity: item.quantity,
           pricePerUnit: item.pricePerUnit.toString(),
           reason: input.reason,
-          newSubtotal: toDecimalString(subtotal),
+          newSubtotal: subtotal.toString(),
         },
       },
     });
 
+    logger.info("Order item voided", { 
+      orderId, 
+      itemId, 
+      productName: item.productName,
+      newSubtotal: subtotal.toString() 
+    });
+
     return updated;
   });
+}
 
-  return updatedOrder;
+/**
+ * Update item quantity (only allowed in OPEN state)
+ * Uses pessimistic locking to prevent race conditions
+ */
+export async function updateItemQuantity(
+  orderId: string,
+  itemId: string,
+  quantity: number
+): Promise<OrderWithItems> {
+  // Validate before acquiring lock
+  if (quantity < 1) {
+    throw new ValidationError(ErrorMessage.ORDER_ITEM.QUANTITY_MIN);
+  }
+
+  logger.info("Updating item quantity", { orderId, itemId, quantity });
+
+  return withOrderLock(orderId, async (tx, order) => {
+    // Validate state inside the lock
+    if (!canModifyItems(order.status)) {
+      throw new InvalidStateError(
+        ErrorMessage.ORDER.MUST_BE_IN_STATE("OPEN", order.status)
+      );
+    }
+
+    const item = order.items.find((i) => i.id === itemId);
+    if (!item) {
+      throw new NotFoundError("Order item", itemId);
+    }
+
+    if (item.status === "VOIDED") {
+      throw new InvalidStateError(ErrorMessage.ORDER_ITEM.ALREADY_VOIDED);
+    }
+
+    // Update item quantity
+    await tx.orderItem.update({
+      where: { id: itemId },
+      data: { quantity },
+    });
+
+    // Fetch all items
+    const allItems = await tx.orderItem.findMany({
+      where: { orderId: order.id },
+    });
+
+    // Recalculate totals using BigInt
+    const { subtotal, grandTotal } = recalculateOrderTotals(
+      allItems.map((i) => ({
+        pricePerUnit: i.pricePerUnit,
+        quantity: i.id === itemId ? quantity : i.quantity,
+        status: i.status,
+      })),
+      order.discountType,
+      order.discountValue
+    );
+
+    // Update order totals
+    const updated = await tx.order.update({
+      where: { id: order.id },
+      data: {
+        subtotal,
+        grandTotal,
+      },
+      include: { items: true },
+    });
+
+    logger.info("Item quantity updated", { 
+      orderId, 
+      itemId, 
+      newQuantity: quantity,
+      newSubtotal: subtotal.toString() 
+    });
+
+    return updated;
+  });
 }
 
 /**
  * Checkout an order (apply discount and finalize)
+ * Uses pessimistic locking to prevent double-checkout race conditions
  */
 export async function checkoutOrder(
   orderId: string,
   input: CheckoutInput
 ): Promise<OrderWithItems> {
-  const order = await db.order.findUnique({
-    where: { id: orderId },
-    include: { items: true },
-  });
-
-  if (!order) {
-    throw new NotFoundError("Order");
-  }
-
-  if (!canCheckout(order.status)) {
-    throw new InvalidStateError(
-      `Cannot checkout order in ${order.status} state. Order must be CONFIRMED first.`
-    );
-  }
-
-  // Check if there are any active items
-  const activeItems = order.items.filter((item) => item.status === "ACTIVE");
-  if (activeItems.length === 0) {
-    throw new ValidationError("Cannot checkout order with no active items");
-  }
-
   const { discountType, discountValue } = input;
 
-  // Validate discount
+  // Validate discount input before acquiring lock
   if (discountType && discountValue === undefined) {
     throw new ValidationError("Discount value is required when type is specified");
   }
 
   if (discountType === "PERCENT" && discountValue !== undefined) {
-    if (discountValue < 0 || discountValue > 100) {
-      throw new ValidationError("Percentage discount must be between 0 and 100");
+    if (discountValue < 0 || discountValue > 50) {
+      throw new ValidationError(ErrorMessage.DISCOUNT.PERCENT_RANGE);
     }
   }
 
-  const updatedOrder = await db.$transaction(async (tx) => {
-    // Calculate final totals
+  // Convert discount value to BigInt
+  const discountValueBigInt = discountValue !== undefined 
+    ? toBigInt(discountValue) 
+    : null;
+
+  logger.info("Processing checkout", { orderId, discountType, discountValue });
+
+  return withOrderLock(orderId, async (tx, order) => {
+    // Validate state inside the lock - critical for preventing double-checkout
+    if (!canCheckout(order.status)) {
+      throw new InvalidStateError(ErrorMessage.ORDER.CANNOT_CHECKOUT_UNCONFIRMED);
+    }
+
+    // Check if there are any active items
+    const activeItems = order.items.filter((item) => item.status === "ACTIVE");
+    if (activeItems.length === 0) {
+      throw new ValidationError(ErrorMessage.ORDER.CANNOT_CHECKOUT_EMPTY);
+    }
+
+    // Calculate final totals using BigInt
     const { subtotal, discount, grandTotal } = recalculateOrderTotals(
       order.items.map((item) => ({
         pricePerUnit: item.pricePerUnit,
@@ -508,18 +581,23 @@ export async function checkoutOrder(
         status: item.status,
       })),
       discountType ?? null,
-      discountValue !== undefined ? new Decimal(discountValue) : null
+      discountValueBigInt
     );
+
+    // Validate fixed discount doesn't exceed subtotal
+    if (discountType === "FIXED" && discountValueBigInt !== null && discountValueBigInt > subtotal) {
+      throw new ValidationError(ErrorMessage.DISCOUNT.EXCEEDS_SUBTOTAL);
+    }
 
     // Update order with final values and mark as PAID
     const updated = await tx.order.update({
       where: { id: orderId },
       data: {
         status: "PAID",
-        subtotal: toDecimalString(subtotal),
+        subtotal,
         discountType: discountType ?? null,
-        discountValue: discountValue !== undefined ? toDecimalString(new Decimal(discountValue)) : null,
-        grandTotal: toDecimalString(grandTotal),
+        discountValue: discountValueBigInt,
+        grandTotal,
       },
       include: { items: true },
     });
@@ -530,41 +608,43 @@ export async function checkoutOrder(
         orderId,
         action: OrderAction.CHECKOUT,
         details: {
-          subtotal: toDecimalString(subtotal),
+          subtotal: subtotal.toString(),
           discountType: discountType ?? null,
           discountValue: discountValue ?? null,
-          discountAmount: toDecimalString(discount),
-          grandTotal: toDecimalString(grandTotal),
+          discountAmount: discount.toString(),
+          grandTotal: grandTotal.toString(),
         },
       },
     });
 
+    logger.info("Order checkout completed", { 
+      orderId, 
+      grandTotal: grandTotal.toString(),
+      discountApplied: discount.toString()
+    });
+
     return updated;
   });
-
-  return updatedOrder;
 }
 
 /**
  * Cancel an order
+ * Uses pessimistic locking to prevent race conditions
  */
 export async function cancelOrder(orderId: string): Promise<OrderWithItems> {
-  const order = await db.order.findUnique({
-    where: { id: orderId },
-    include: { items: true },
-  });
+  logger.info("Cancelling order", { orderId });
 
-  if (!order) {
-    throw new NotFoundError("Order");
-  }
+  return withOrderLock(orderId, async (tx, order) => {
+    // Validate state inside the lock
+    if (!canCancel(order.status)) {
+      if (order.status === "PAID") {
+        throw new InvalidStateError(ErrorMessage.ORDER.CANNOT_CANCEL_PAID);
+      }
+      throw new InvalidStateError(
+        ErrorMessage.ORDER.INVALID_STATE_TRANSITION(order.status, "CANCELLED")
+      );
+    }
 
-  if (!canCancel(order.status)) {
-    throw new InvalidStateError(
-      `Cannot cancel order in ${order.status} state`
-    );
-  }
-
-  const updatedOrder = await db.$transaction(async (tx) => {
     const updated = await tx.order.update({
       where: { id: orderId },
       data: { status: "CANCELLED" },
@@ -582,10 +662,10 @@ export async function cancelOrder(orderId: string): Promise<OrderWithItems> {
       },
     });
 
+    logger.info("Order cancelled", { orderId, previousStatus: order.status });
+
     return updated;
   });
-
-  return updatedOrder;
 }
 
 /**
@@ -610,14 +690,84 @@ export async function getOrderById(
 }
 
 /**
- * List orders with optional filters
+ * List orders with optional filters and pagination
+ * Returns lean list items for efficiency
  */
-export async function listOrders(filters?: {
+export async function listOrders(
+  filters?: OrderFilters
+): Promise<PaginatedResponse<OrderListItem>> {
+  const page = filters?.page ?? 1;
+  const limit = Math.min(filters?.limit ?? 20, 100); // Max 100 per page
+  const skip = (page - 1) * limit;
+
+  const where: Record<string, unknown> = {};
+
+  if (filters?.status) {
+    where.status = filters.status;
+  }
+
+  if (filters?.tableNumber) {
+    where.tableNumber = filters.tableNumber;
+  }
+
+  if (filters?.startDate || filters?.endDate) {
+    where.createdAt = {};
+    if (filters.startDate) {
+      (where.createdAt as Record<string, Date>).gte = filters.startDate;
+    }
+    if (filters.endDate) {
+      (where.createdAt as Record<string, Date>).lte = filters.endDate;
+    }
+  }
+
+  const [orders, total] = await Promise.all([
+    db.order.findMany({
+      where,
+      include: {
+        items: {
+          where: { status: "ACTIVE" },
+          select: { id: true }, // Only need for count
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      skip,
+      take: limit,
+    }),
+    db.order.count({ where }),
+  ]);
+
+  // Transform to lean list items
+  const data = orders.map((order) => ({
+    id: order.id,
+    tableNumber: order.tableNumber,
+    status: order.status,
+    grandTotal: order.grandTotal.toString(),
+    itemCount: order.items.length,
+    createdAt: order.createdAt.toISOString(),
+  }));
+
+  return {
+    data,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+      hasNext: page * limit < total,
+      hasPrev: page > 1,
+    },
+  };
+}
+
+/**
+ * Get orders with full items (for internal use or detailed view)
+ */
+export async function listOrdersWithItems(filters?: {
   status?: OrderStatus;
   startDate?: Date;
   endDate?: Date;
   tableNumber?: number;
-}) {
+}): Promise<OrderWithItems[]> {
   const where: Record<string, unknown> = {};
 
   if (filters?.status) {

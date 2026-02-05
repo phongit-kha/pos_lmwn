@@ -35,7 +35,16 @@ export const voidItemSchema = z.object({
 });
 
 /**
+ * Schema for updating item quantity
+ */
+export const updateItemQuantitySchema = z.object({
+  quantity: z.number().int().min(1, "Quantity must be at least 1").max(999, "Quantity cannot exceed 999"),
+});
+
+/**
  * Schema for checkout
+ * - PERCENT: discount value is 0-100 (percentage)
+ * - FIXED: discount value is in satang (1 baht = 100 satang)
  */
 export const checkoutSchema = z.object({
   discountType: z.enum(["PERCENT", "FIXED"]).optional(),
@@ -53,10 +62,14 @@ export const checkoutSchema = z.object({
     if (data.discountType === "PERCENT" && data.discountValue !== undefined) {
       return data.discountValue >= 0 && data.discountValue <= 100;
     }
+    // If FIXED, value should be an integer (satang)
+    if (data.discountType === "FIXED" && data.discountValue !== undefined) {
+      return Number.isInteger(data.discountValue);
+    }
     return true;
   },
   {
-    message: "Invalid discount configuration. Percentage must be 0-100, and value is required when type is specified.",
+    message: "Invalid discount configuration. Percentage must be 0-100, FIXED must be integer (satang), and value is required when type is specified.",
   }
 );
 
@@ -103,6 +116,7 @@ export const salesReportFilterSchema = z.object({
 export type CreateOrderInput = z.infer<typeof createOrderSchema>;
 export type AddItemsInput = z.infer<typeof addItemsSchema>;
 export type VoidItemInput = z.infer<typeof voidItemSchema>;
+export type UpdateItemQuantityInput = z.infer<typeof updateItemQuantitySchema>;
 export type CheckoutInput = z.infer<typeof checkoutSchema>;
 export type OrderListFilter = z.infer<typeof orderListFilterSchema>;
 export type SalesReportFilter = z.infer<typeof salesReportFilterSchema>;
