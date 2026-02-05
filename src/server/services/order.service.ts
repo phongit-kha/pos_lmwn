@@ -793,7 +793,8 @@ export async function listOrdersWithItems(filters?: {
     include: {
       items: true,
     },
-    orderBy: { createdAt: "desc" },
+    // Sort by updatedAt so recently modified orders (including cancelled) appear first
+    orderBy: { updatedAt: "desc" },
   });
 
   return orders;
