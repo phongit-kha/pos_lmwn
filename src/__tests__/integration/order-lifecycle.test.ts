@@ -2,12 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import Decimal from "decimal.js";
 
 // Mock the database module
+// Prices are in satang (1 baht = 100 satang)
 vi.mock("@/server/db", () => {
   const mockProducts = [
     {
       id: "prod_1",
       name: "Burger",
-      price: new Decimal("10.99"),
+      price: new Decimal("10990"), // 109.90 baht in satang
       category: "Food",
       isActive: true,
       createdAt: new Date(),
@@ -16,7 +17,7 @@ vi.mock("@/server/db", () => {
     {
       id: "prod_2",
       name: "Fries",
-      price: new Decimal("4.99"),
+      price: new Decimal("4990"), // 49.90 baht in satang
       category: "Sides",
       isActive: true,
       createdAt: new Date(),
@@ -153,10 +154,46 @@ vi.mock("@/server/db", () => {
           return Promise.resolve(orderLogs.get(where.orderId) || []);
         }),
       },
-      $transaction: vi.fn(async (callback) => {
-        // For testing, execute the callback with the same mock db
-        const { db } = await import("@/server/db");
-        return callback(db);
+      // Raw query support for pessimistic locking
+      $queryRaw: vi.fn((strings, ...values) => {
+        // Parse the template literal to extract order ID
+        const query = typeof strings === 'string' 
+          ? strings 
+          : strings.reduce((acc, str, i) => acc + str + (values[i] ?? ''), '');
+        
+        // Check if it's a SELECT ... FOR UPDATE query for orders
+        if (query.includes('SELECT') && query.includes('"Order"')) {
+          // Extract the order ID from values
+          const orderId = values[0];
+          const order = orders.get(orderId);
+          if (order) {
+            return Promise.resolve([order]);
+          }
+          return Promise.resolve([]);
+        }
+        return Promise.resolve([]);
+      }),
+      $transaction: vi.fn(async (callbackOrPromises, options) => {
+        // Check if it's a callback style (used by withOrderLock)
+        if (typeof callbackOrPromises === 'function') {
+          // Create a transaction client that mirrors the db object
+          const { db } = await import("@/server/db");
+          const txClient = {
+            ...db,
+            // $queryRaw for transaction client (used by withOrderLock)
+            $queryRaw: vi.fn((strings, ...values) => {
+              const orderId = values[0];
+              const order = orders.get(orderId);
+              if (order) {
+                return Promise.resolve([order]);
+              }
+              return Promise.resolve([]);
+            }),
+          };
+          return callbackOrPromises(txClient);
+        }
+        // Array of promises style
+        return Promise.all(callbackOrPromises);
       }),
     },
   };
@@ -203,7 +240,8 @@ describe("Order Lifecycle Integration", () => {
       const item = order.items[0];
       expect(item).toBeDefined();
       expect(item?.productName).toBe("Burger");
-      expect(new Decimal(item?.pricePerUnit.toString() || 0).toFixed(2)).toBe("10.99");
+      // Price is in satang (10990 satang = 109.90 baht)
+      expect(new Decimal(item?.pricePerUnit.toString() || 0).toFixed(0)).toBe("10990");
     });
 
     it("should throw NotFoundError for invalid product", async () => {

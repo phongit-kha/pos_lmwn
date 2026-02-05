@@ -189,11 +189,14 @@ describe("Order Validators", () => {
 });
 
 describe("Product Validators", () => {
+  // Note: Prices are now in satang (integer cents)
+  // e.g., 999 satang = 9.99 baht
+  
   describe("createProductSchema", () => {
     it("should validate valid product input", () => {
       const input = {
         name: "Burger",
-        price: 9.99,
+        price: 999, // 9.99 baht in satang
         category: "Food",
       };
 
@@ -204,7 +207,7 @@ describe("Product Validators", () => {
     it("should default isActive to true", () => {
       const input = {
         name: "Burger",
-        price: 9.99,
+        price: 999, // satang
         category: "Food",
       };
 
@@ -218,7 +221,7 @@ describe("Product Validators", () => {
     it("should reject empty name", () => {
       const input = {
         name: "",
-        price: 9.99,
+        price: 999,
         category: "Food",
       };
 
@@ -229,7 +232,7 @@ describe("Product Validators", () => {
     it("should reject negative price", () => {
       const input = {
         name: "Burger",
-        price: -5,
+        price: -500,
         category: "Food",
       };
 
@@ -237,10 +240,10 @@ describe("Product Validators", () => {
       expect(result.success).toBe(false);
     });
 
-    it("should reject price with more than 2 decimal places", () => {
+    it("should reject price with decimal places (must be integer satang)", () => {
       const input = {
         name: "Burger",
-        price: 9.999,
+        price: 9.99, // Not allowed - must be integer
         category: "Food",
       };
 
@@ -259,7 +262,7 @@ describe("Product Validators", () => {
     it("should validate full update", () => {
       const input = {
         name: "New Burger",
-        price: 12.99,
+        price: 1299, // 12.99 baht in satang
         category: "Premium Food",
         isActive: false,
       };
