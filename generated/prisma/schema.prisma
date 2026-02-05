@@ -1,6 +1,15 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
+// ==========================================
+// DATABASE DESIGN PRINCIPLES
+// ==========================================
+// 1. Money as BigInt (satang) - NO floating point errors
+// 2. FK constraints for referential integrity
+// 3. Composite indexes for common query patterns
+// 4. Partial unique index for business rules
+// 5. Explicit column sizes for optimization
+
 generator client {
   provider = "prisma-client-js"
   output   = "../generated/prisma"
@@ -11,9 +20,9 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// ============================================
+// ==========================================
 // Enums
-// ============================================
+// ==========================================
 
 enum OrderStatus {
   OPEN
@@ -27,85 +36,133 @@ enum OrderItemStatus {
   VOIDED
 }
 
-// ============================================
-// Models
-// ============================================
+// ==========================================
+// Product - Master Data
+// ==========================================
 
 /// Product master data for menu items
 model Product {
   id        String   @id @default(cuid())
-  name      String
-  price     Decimal  @db.Decimal(10, 2)
-  category  String
+  name      String   @db.VarChar(200)
+  /// Price in satang (10000 = 100 baht). Using BigInt for precise integer arithmetic.
+  price     BigInt
+  category  String   @db.VarChar(100)
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // Relations
+  orderItems OrderItem[]
+
+  // Indexes for common queries
   @@index([category])
   @@index([isActive])
+  @@index([category, isActive]) // Combined filter for menu display
 }
+
+// ==========================================
+// Order - Transaction Header
+// ==========================================
 
 /// Order transaction header
 model Order {
-  id            String      @id @default(cuid())
-  tableNumber   Int
-  status        OrderStatus @default(OPEN)
-  /// Financial snapshot - cached subtotal of all ACTIVE items
-  subtotal      Decimal     @default(0) @db.Decimal(10, 2)
-  /// Discount type: "PERCENT" or "FIXED"
-  discountType  String?
-  /// Discount value (percentage or fixed amount)
-  discountValue Decimal?    @db.Decimal(10, 2)
-  /// Final total after discount (floors at 0.00)
-  grandTotal    Decimal     @default(0) @db.Decimal(10, 2)
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  id          String @id @default(cuid())
+  tableNumber Int    @db.SmallInt // 1-999 tables max
 
+  status OrderStatus @default(OPEN)
+
+  // Financial fields - ALL in satang (BigInt)
+  /// Cached subtotal of all ACTIVE items in satang
+  subtotal BigInt @default(0)
+
+  /// Discount type: "PERCENT" or "FIXED"
+  discountType String? @db.VarChar(10)
+
+  /// Discount value: satang for FIXED, whole percentage (10 = 10%) for PERCENT
+  discountValue BigInt?
+
+  /// Final total after discount in satang (floors at 0)
+  grandTotal BigInt @default(0)
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
   items OrderItem[]
   logs  OrderLog[]
 
+  // CRITICAL: Prevent multiple active orders per table
+  // Using composite unique - will need partial index via raw SQL migration
+  // @@unique([tableNumber, status], map: "Order_tableNumber_activeStatus_key")
+
+  // Indexes for common queries
   @@index([status])
   @@index([tableNumber])
-  @@index([createdAt])
+  @@index([createdAt(sort: Desc)])
+  @@index([status, createdAt(sort: Desc)]) // Dashboard: recent by status
+  @@index([tableNumber, status]) // Find active order for table
 }
+
+// ==========================================
+// OrderItem - Transaction Detail
+// ==========================================
 
 /// Order item / transaction detail with frozen price
 model OrderItem {
-  id            String          @id @default(cuid())
-  orderId       String
-  productId     String
+  id        String @id @default(cuid())
+  orderId   String
+  productId String
+
+  // Frozen product data (historical accuracy)
   /// Frozen product name at time of order
-  productName   String
-  /// Frozen price per unit at time of order (critical for historical accuracy)
-  pricePerUnit  Decimal         @db.Decimal(10, 2)
-  quantity      Int
-  /// Batch sequence for grouping items added at different times
-  batchSequence Int             @default(1)
+  productName String @db.VarChar(200)
+
+  /// Frozen price per unit in satang at time of order
+  pricePerUnit BigInt
+
+  quantity      Int             @db.SmallInt // 1-999 per item
+  batchSequence Int             @default(1) @db.SmallInt // 1, 2, 3...
   status        OrderItemStatus @default(ACTIVE)
+
   /// Reason for voiding (required when status is VOIDED)
-  voidReason    String?
-  createdAt     DateTime        @default(now())
+  voidReason String?  @db.VarChar(500)
+  createdAt  DateTime @default(now())
 
-  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  // Relations with FK constraints
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
 
+  // Indexes
   @@index([orderId])
-  @@index([status])
-  @@index([batchSequence])
+  @@index([orderId, status]) // Count active items for order
+  @@index([productId]) // Product sales analysis
+  @@index([orderId, batchSequence]) // Group by batch
 }
+
+// ==========================================
+// OrderLog - Audit Trail
+// ==========================================
 
 /// Audit log for order actions
 model OrderLog {
-  id        String   @id @default(cuid())
-  orderId   String
+  id      String @id @default(cuid())
+  orderId String
+
   /// Action type: CREATE, ADD_ITEMS, CONFIRM, VOID_ITEM, CHECKOUT, CANCEL
-  action    String
+  action String @db.VarChar(50)
+
   /// JSON details of the action
-  details   Json
+  details Json
+
+  // Timestamps
   createdAt DateTime @default(now())
 
+  // Relations
   order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
-  @@index([orderId])
-  @@index([action])
-  @@index([createdAt])
+  // Indexes
+  @@index([orderId, createdAt(sort: Desc)]) // Order history timeline
+  @@index([action]) // Filter by action type
+  @@index([createdAt(sort: Desc)]) // Recent actions (audit)
 }
