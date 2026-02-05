@@ -3,11 +3,12 @@ import {
   successResponse,
   handleError,
   parseJsonBody,
+  getRequestId,
 } from "@/server/lib/api-response";
-import { transformOrder, transformOrderListItem } from "@/server/lib/transformers";
-import { createOrderSchema, orderListFilterSchema } from "@/server/validators";
-import { createOrder, listOrders } from "@/server/services/order.service";
-import type { OrderStatus } from "@/server/types";
+import { transformOrder } from "@/server/lib/transformers";
+import { createOrderSchema } from "@/server/validators";
+import { parseOrderFilters } from "@/server/validators/pagination.validator";
+import { createOrder, listOrdersWithItems } from "@/server/services/order.service";
 
 /**
  * @swagger
@@ -56,14 +57,15 @@ import type { OrderStatus } from "@/server/types";
  *         description: Product not found
  */
 export async function POST(request: NextRequest) {
+  const requestId = getRequestId(request);
   try {
     const body = await parseJsonBody(request);
     const validatedData = createOrderSchema.parse(body);
 
     const order = await createOrder(validatedData);
-    return successResponse(transformOrder(order), 201);
+    return successResponse(transformOrder(order), requestId, { status: 201 });
   } catch (error) {
-    return handleError(error);
+    return handleError(error, requestId);
   }
 }
 
@@ -72,7 +74,7 @@ export async function POST(request: NextRequest) {
  * /api/orders:
  *   get:
  *     summary: List orders
- *     description: Get a list of orders with optional filters
+ *     description: Get a paginated list of orders with optional filters. Returns lean list items for efficiency.
  *     tags:
  *       - Orders
  *     parameters:
@@ -99,32 +101,47 @@ export async function POST(request: NextRequest) {
  *           type: string
  *           format: date-time
  *         description: Filter orders created before this date
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           default: 1
+ *         description: Page number
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 20
+ *         description: Items per page
  *     responses:
  *       200:
- *         description: List of orders
+ *         description: Paginated list of orders
  *       400:
  *         description: Invalid query parameters
  */
 export async function GET(request: NextRequest) {
+  const requestId = getRequestId(request);
   try {
     const { searchParams } = new URL(request.url);
-    
-    const filters = orderListFilterSchema.parse({
-      status: searchParams.get("status") ?? undefined,
-      tableNumber: searchParams.get("tableNumber") ?? undefined,
-      startDate: searchParams.get("startDate") ?? undefined,
-      endDate: searchParams.get("endDate") ?? undefined,
-    });
+    const filters = parseOrderFilters(searchParams);
 
-    const orders = await listOrders({
-      status: filters.status as OrderStatus | undefined,
+    // Use listOrdersWithItems to get full orders with items
+    // This is needed for frontend display
+    const orders = await listOrdersWithItems({
+      status: filters.status,
       tableNumber: filters.tableNumber,
-      startDate: filters.startDate ? new Date(filters.startDate) : undefined,
-      endDate: filters.endDate ? new Date(filters.endDate) : undefined,
+      startDate: filters.startDate,
+      endDate: filters.endDate,
     });
 
-    return successResponse(orders.map(transformOrderListItem));
+    // Transform orders to API response format
+    const transformedOrders = orders.map(transformOrder);
+
+    return successResponse(transformedOrders, requestId);
   } catch (error) {
-    return handleError(error);
+    return handleError(error, requestId);
   }
 }

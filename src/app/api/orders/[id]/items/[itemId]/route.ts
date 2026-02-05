@@ -6,19 +6,22 @@ import {
   getRequestId,
 } from "@/server/lib/api-response";
 import { transformOrder } from "@/server/lib/transformers";
-import { voidItemSchema } from "@/server/validators";
-import { voidOrderItem } from "@/server/services/order.service";
+import { updateItemQuantitySchema } from "@/server/validators";
+import { updateItemQuantity } from "@/server/services/order.service";
 
 interface RouteParams {
-  params: Promise<{ id: string; itemId: string }>;
+  params: Promise<{
+    id: string;
+    itemId: string;
+  }>;
 }
 
 /**
  * @swagger
- * /api/orders/{id}/items/{itemId}/void:
- *   patch:
- *     summary: Void an order item
- *     description: Soft delete an item with a mandatory reason. Only allowed in CONFIRMED status.
+ * /api/orders/{id}/items/{itemId}:
+ *   put:
+ *     summary: Update item quantity
+ *     description: Update the quantity of an order item. Only allowed in OPEN status.
  *     tags:
  *       - Order Actions
  *     parameters:
@@ -41,31 +44,28 @@ interface RouteParams {
  *           schema:
  *             type: object
  *             required:
- *               - reason
+ *               - quantity
  *             properties:
- *               reason:
- *                 type: string
- *                 minLength: 1
- *                 description: Reason for voiding the item
+ *               quantity:
+ *                 type: integer
+ *                 minimum: 1
+ *                 description: New quantity
  *     responses:
  *       200:
- *         description: Item voided successfully
+ *         description: Item quantity updated successfully
  *       400:
  *         description: Invalid state or validation error
  *       404:
  *         description: Order or item not found
  */
-export async function PATCH(
-  request: NextRequest,
-  { params }: RouteParams
-) {
+export async function PUT(request: NextRequest, { params }: RouteParams) {
   const requestId = getRequestId(request);
   try {
-    const { id, itemId } = await params;
+    const { id: orderId, itemId } = await params;
     const body = await parseJsonBody(request);
-    const validatedData = voidItemSchema.parse(body);
+    const { quantity } = updateItemQuantitySchema.parse(body);
 
-    const order = await voidOrderItem(id, itemId, validatedData);
+    const order = await updateItemQuantity(orderId, itemId, quantity);
     return successResponse(transformOrder(order), requestId);
   } catch (error) {
     return handleError(error, requestId);

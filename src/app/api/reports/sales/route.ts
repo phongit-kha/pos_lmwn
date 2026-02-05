@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import {
   successResponse,
   handleError,
+  getRequestId,
 } from "@/server/lib/api-response";
 import { salesReportFilterSchema } from "@/server/validators";
 import { generateSalesReport } from "@/server/services/report.service";
@@ -11,7 +12,7 @@ import { generateSalesReport } from "@/server/services/report.service";
  * /api/reports/sales:
  *   get:
  *     summary: Get sales report
- *     description: Aggregate sales data for PAID orders only, grouped by date
+ *     description: Aggregate sales data for PAID orders only, grouped by date. All monetary values are in satang (1 baht = 100 satang).
  *     tags:
  *       - Reports
  *     parameters:
@@ -47,10 +48,13 @@ import { generateSalesReport } from "@/server/services/report.service";
  *                           type: integer
  *                         totalSales:
  *                           type: string
+ *                           description: Total sales in satang
  *                         totalDiscount:
  *                           type: string
+ *                           description: Total discount in satang
  *                         netSales:
  *                           type: string
+ *                           description: Net sales in satang
  *                     dailyBreakdown:
  *                       type: array
  *                       items:
@@ -67,10 +71,18 @@ import { generateSalesReport } from "@/server/services/report.service";
  *                             type: string
  *                           netSales:
  *                             type: string
+ *                 meta:
+ *                   type: object
+ *                   properties:
+ *                     requestId:
+ *                       type: string
+ *                     timestamp:
+ *                       type: string
  *       400:
  *         description: Invalid query parameters
  */
 export async function GET(request: NextRequest) {
+  const requestId = getRequestId(request);
   try {
     const { searchParams } = new URL(request.url);
 
@@ -84,8 +96,8 @@ export async function GET(request: NextRequest) {
       endDate: filters.endDate ? new Date(filters.endDate) : undefined,
     });
 
-    return successResponse(report);
+    return successResponse(report, requestId);
   } catch (error) {
-    return handleError(error);
+    return handleError(error, requestId);
   }
 }

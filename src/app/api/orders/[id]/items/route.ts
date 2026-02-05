@@ -3,6 +3,7 @@ import {
   successResponse,
   handleError,
   parseJsonBody,
+  getRequestId,
 } from "@/server/lib/api-response";
 import { transformOrder } from "@/server/lib/transformers";
 import { addItemsSchema } from "@/server/validators";
@@ -62,14 +63,15 @@ export async function POST(
   request: NextRequest,
   { params }: RouteParams
 ) {
+  const requestId = getRequestId(request);
   try {
     const { id } = await params;
     const body = await parseJsonBody(request);
     const validatedData = addItemsSchema.parse(body);
 
     const order = await addItemsToOrder(id, validatedData);
-    return successResponse(transformOrder(order));
+    return successResponse(transformOrder(order), requestId);
   } catch (error) {
-    return handleError(error);
+    return handleError(error, requestId);
   }
 }

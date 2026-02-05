@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import {
   successResponse,
   handleError,
+  getRequestId,
 } from "@/server/lib/api-response";
 import { transformOrder } from "@/server/lib/transformers";
 import { checkoutSchema } from "@/server/validators";
@@ -40,7 +41,7 @@ interface RouteParams {
  *               discountValue:
  *                 type: number
  *                 minimum: 0
- *                 description: Discount value (percentage 0-100 or fixed amount)
+ *                 description: Discount value (percentage 0-50 for PERCENT, satang for FIXED)
  *     responses:
  *       200:
  *         description: Order checked out successfully
@@ -53,6 +54,7 @@ export async function POST(
   request: NextRequest,
   { params }: RouteParams
 ) {
+  const requestId = getRequestId(request);
   try {
     const { id } = await params;
     
@@ -66,8 +68,8 @@ export async function POST(
 
     const validatedData = checkoutSchema.parse(body);
     const order = await checkoutOrder(id, validatedData);
-    return successResponse(transformOrder(order));
+    return successResponse(transformOrder(order), requestId);
   } catch (error) {
-    return handleError(error);
+    return handleError(error, requestId);
   }
 }

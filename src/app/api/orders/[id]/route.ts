@@ -2,10 +2,11 @@ import type { NextRequest } from "next/server";
 import {
   successResponse,
   handleError,
+  getRequestId,
+  NotFoundError,
 } from "@/server/lib/api-response";
 import { transformOrder } from "@/server/lib/transformers";
 import { getOrderById } from "@/server/services/order.service";
-import { NotFoundError } from "@/server/types";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -36,16 +37,17 @@ export async function GET(
   request: NextRequest,
   { params }: RouteParams
 ) {
+  const requestId = getRequestId(request);
   try {
     const { id } = await params;
     const order = await getOrderById(id);
 
     if (!order) {
-      throw new NotFoundError("Order");
+      throw new NotFoundError("Order", id);
     }
 
-    return successResponse(transformOrder(order));
+    return successResponse(transformOrder(order), requestId);
   } catch (error) {
-    return handleError(error);
+    return handleError(error, requestId);
   }
 }
