@@ -1,10 +1,9 @@
 import { db } from "@/server/db";
-import type { Product } from "@/server/types";
+import type { Product, ProductFilters, PaginatedResponse } from "@/server/types";
 import { NotFoundError } from "@/server/types";
 import type {
   CreateProductInput,
   UpdateProductInput,
-  ProductListFilter,
 } from "@/server/validators/product.validator";
 
 /**
@@ -14,7 +13,7 @@ export async function createProduct(input: CreateProductInput): Promise<Product>
   const product = await db.product.create({
     data: {
       name: input.name,
-      price: input.price,
+      price: BigInt(input.price), // Convert to BigInt for satang storage
       category: input.category,
       isActive: input.isActive ?? true,
     },
@@ -41,21 +40,35 @@ export async function updateProduct(
 ): Promise<Product> {
   const existing = await getProductById(id);
   if (!existing) {
-    throw new NotFoundError("Product");
+    throw new NotFoundError("Product", id);
   }
+
+  const updateData: Record<string, unknown> = {};
+  
+  if (input.name !== undefined) updateData.name = input.name;
+  if (input.price !== undefined) updateData.price = BigInt(input.price);
+  if (input.category !== undefined) updateData.category = input.category;
+  if (input.isActive !== undefined) updateData.isActive = input.isActive;
 
   const product = await db.product.update({
     where: { id },
-    data: input,
+    data: updateData,
   });
 
   return product;
 }
 
 /**
- * List products with optional filters
+ * List products with optional filters and pagination
+ * Returns paginated response with lean product items
  */
-export async function listProducts(filters?: ProductListFilter): Promise<Product[]> {
+export async function listProducts(
+  filters?: ProductFilters
+): Promise<PaginatedResponse<Product>> {
+  const page = filters?.page ?? 1;
+  const limit = Math.min(filters?.limit ?? 20, 100); // Max 100 per page
+  const skip = (page - 1) * limit;
+
   const where: Record<string, unknown> = {};
 
   if (filters?.category) {
@@ -73,8 +86,35 @@ export async function listProducts(filters?: ProductListFilter): Promise<Product
     };
   }
 
+  const [products, total] = await Promise.all([
+    db.product.findMany({
+      where,
+      orderBy: [{ category: "asc" }, { name: "asc" }],
+      skip,
+      take: limit,
+    }),
+    db.product.count({ where }),
+  ]);
+
+  return {
+    data: products,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+      hasNext: page * limit < total,
+      hasPrev: page > 1,
+    },
+  };
+}
+
+/**
+ * List all active products (for menu display, no pagination)
+ */
+export async function listActiveProducts(): Promise<Product[]> {
   return db.product.findMany({
-    where,
+    where: { isActive: true },
     orderBy: [{ category: "asc" }, { name: "asc" }],
   });
 }
@@ -85,11 +125,23 @@ export async function listProducts(filters?: ProductListFilter): Promise<Product
 export async function deleteProduct(id: string): Promise<Product> {
   const existing = await getProductById(id);
   if (!existing) {
-    throw new NotFoundError("Product");
+    throw new NotFoundError("Product", id);
   }
 
   return db.product.update({
     where: { id },
     data: { isActive: false },
+  });
+}
+
+/**
+ * Get products by IDs (for order creation)
+ */
+export async function getProductsByIds(ids: string[]): Promise<Product[]> {
+  return db.product.findMany({
+    where: {
+      id: { in: ids },
+      isActive: true,
+    },
   });
 }
